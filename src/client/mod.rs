@@ -108,6 +108,16 @@ pub enum ClientConfigKey {
     /// Supported keys:
     /// - `connect_timeout`
     ConnectTimeout,
+    /// Timeout for only the connect phase of a Client when connecting to metadata endpoints
+    ///
+    /// Metadata endpoints are used to retrieve credentials and other configuration
+    /// from the cloud provider's instance metadata service. This timeout is separate
+    /// from the regular connect timeout to allow for quick feedback when the metadata
+    /// service is not available.
+    ///
+    /// Supported keys:
+    /// - `metadata_connect_timeout`
+    MetadataConnectTimeout,
     /// default [`Content-Type`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Type) for uploads
     ///
     /// Supported keys:
@@ -193,6 +203,14 @@ pub enum ClientConfigKey {
     /// Supported keys:
     /// - `timeout`
     Timeout,
+    /// Request timeout for metadata endpoints
+    ///
+    /// If set, overrides [`ClientConfigKey::Timeout`] when connecting to cloud provider
+    /// instance metadata endpoints. If not set, the main [`ClientConfigKey::Timeout`] is used.
+    ///
+    /// Supported keys:
+    /// - `metadata_timeout`
+    MetadataTimeout,
     /// User-Agent header to be used by this client
     ///
     /// Supported keys:
@@ -206,6 +224,7 @@ impl AsRef<str> for ClientConfigKey {
             Self::AllowHttp => "allow_http",
             Self::AllowInvalidCertificates => "allow_invalid_certificates",
             Self::ConnectTimeout => "connect_timeout",
+            Self::MetadataConnectTimeout => "metadata_connect_timeout",
             Self::DefaultContentType => "default_content_type",
             Self::Http1Only => "http1_only",
             Self::Http2Only => "http2_only",
@@ -220,6 +239,7 @@ impl AsRef<str> for ClientConfigKey {
             Self::ProxyExcludes => "proxy_excludes",
             Self::RandomizeAddresses => "randomize_addresses",
             Self::Timeout => "timeout",
+            Self::MetadataTimeout => "metadata_timeout",
             Self::UserAgent => "user_agent",
         }
     }
@@ -233,6 +253,7 @@ impl FromStr for ClientConfigKey {
             "allow_http" => Ok(Self::AllowHttp),
             "allow_invalid_certificates" => Ok(Self::AllowInvalidCertificates),
             "connect_timeout" => Ok(Self::ConnectTimeout),
+            "metadata_connect_timeout" => Ok(Self::MetadataConnectTimeout),
             "default_content_type" => Ok(Self::DefaultContentType),
             "http1_only" => Ok(Self::Http1Only),
             "http2_only" => Ok(Self::Http2Only),
@@ -247,6 +268,7 @@ impl FromStr for ClientConfigKey {
             "proxy_excludes" => Ok(Self::ProxyExcludes),
             "randomize_addresses" => Ok(Self::RandomizeAddresses),
             "timeout" => Ok(Self::Timeout),
+            "metadata_timeout" => Ok(Self::MetadataTimeout),
             "user_agent" => Ok(Self::UserAgent),
             _ => Err(super::Error::UnknownConfigurationKey {
                 store: "HTTP",
@@ -354,7 +376,9 @@ pub struct ClientOptions {
     allow_http: ConfigValue<bool>,
     allow_insecure: ConfigValue<bool>,
     timeout: Option<ConfigValue<Duration>>,
+    metadata_timeout: Option<ConfigValue<Duration>>,
     connect_timeout: Option<ConfigValue<Duration>>,
+    metadata_connect_timeout: Option<ConfigValue<Duration>>,
     pool_idle_timeout: Option<ConfigValue<Duration>>,
     pool_max_idle_per_host: Option<ConfigValue<usize>>,
     http2_keep_alive_interval: Option<ConfigValue<Duration>>,
@@ -389,7 +413,9 @@ impl Default for ClientOptions {
             allow_http: Default::default(),
             allow_insecure: Default::default(),
             timeout: Some(Duration::from_secs(30).into()),
+            metadata_timeout: None,
             connect_timeout: Some(Duration::from_secs(5).into()),
+            metadata_connect_timeout: None,
             pool_idle_timeout: None,
             pool_max_idle_per_host: None,
             http2_keep_alive_interval: None,
@@ -421,6 +447,12 @@ impl ClientOptions {
             ClientConfigKey::ConnectTimeout => {
                 self.connect_timeout = Some(ConfigValue::Deferred(value.into()))
             }
+            ClientConfigKey::MetadataTimeout => {
+                self.metadata_timeout = Some(ConfigValue::Deferred(value.into()))
+            }
+            ClientConfigKey::MetadataConnectTimeout => {
+                self.metadata_connect_timeout = Some(ConfigValue::Deferred(value.into()))
+            }
             ClientConfigKey::DefaultContentType => self.default_content_type = Some(value.into()),
             ClientConfigKey::Http1Only => self.http1_only.parse(value),
             ClientConfigKey::Http2Only => self.http2_only.parse(value),
@@ -449,6 +481,9 @@ impl ClientOptions {
                 self.randomize_addresses.parse(value);
             }
             ClientConfigKey::Timeout => self.timeout = Some(ConfigValue::Deferred(value.into())),
+            ClientConfigKey::MetadataTimeout => {
+                self.metadata_timeout = Some(ConfigValue::Deferred(value.into()))
+            }
             ClientConfigKey::UserAgent => {
                 self.user_agent = Some(ConfigValue::Deferred(value.into()))
             }
@@ -462,6 +497,10 @@ impl ClientOptions {
             ClientConfigKey::AllowHttp => Some(self.allow_http.to_string()),
             ClientConfigKey::AllowInvalidCertificates => Some(self.allow_insecure.to_string()),
             ClientConfigKey::ConnectTimeout => self.connect_timeout.as_ref().map(fmt_duration),
+            ClientConfigKey::MetadataTimeout => self.metadata_timeout.as_ref().map(fmt_duration),
+            ClientConfigKey::MetadataConnectTimeout => {
+                self.metadata_connect_timeout.as_ref().map(fmt_duration)
+            }
             ClientConfigKey::DefaultContentType => self.default_content_type.clone(),
             ClientConfigKey::Http1Only => Some(self.http1_only.to_string()),
             ClientConfigKey::Http2KeepAliveInterval => {
@@ -657,6 +696,22 @@ impl ClientOptions {
         self
     }
 
+    /// Set a timeout for the overall request when connecting to metadata endpoints
+    ///
+    /// Metadata endpoints are used to retrieve credentials and other configuration
+    /// from the cloud provider's instance metadata service (e.g. IMDSv2 on AWS,
+    /// the GCE metadata server, or the Azure IMDS). If set, this timeout overrides
+    /// [`Self::with_timeout`] for metadata endpoint requests. If not set, the main
+    /// timeout configured via [`Self::with_timeout`] is used.
+    ///
+    /// # See Also
+    /// * [`Self::with_timeout`] to set a timeout for regular requests
+    /// * [`Self::with_metadata_connect_timeout`] to set a connect-phase timeout for metadata endpoints
+    pub fn with_metadata_timeout(mut self, timeout: Duration) -> Self {
+        self.metadata_timeout = Some(ConfigValue::Parsed(timeout));
+        self
+    }
+
     /// Set a timeout for only the connect phase of a Client
     ///
     /// This is the time allowed for the client to establish a connection
@@ -683,6 +738,23 @@ impl ClientOptions {
     /// * [`Self::with_connect_timeout`]
     pub fn with_connect_timeout_disabled(mut self) -> Self {
         self.connect_timeout = None;
+        self
+    }
+
+    /// Set a timeout for only the connect phase when connecting to metadata endpoints
+    ///
+    /// Metadata endpoints are used to retrieve credentials and other configuration
+    /// from the cloud provider's instance metadata service (e.g. IMDSv2 on AWS,
+    /// the GCE metadata server, or the Azure IMDS). This timeout is applied
+    /// separately from [`Self::with_connect_timeout`] to allow for quick feedback
+    /// when the metadata service is not available.
+    ///
+    /// Default is 5 seconds
+    ///
+    /// # See Also
+    /// * [`Self::with_connect_timeout`] to set a timeout for regular connections
+    pub fn with_metadata_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.metadata_connect_timeout = Some(ConfigValue::Parsed(timeout));
         self
     }
 
@@ -801,12 +873,24 @@ impl ClientOptions {
     ///
     /// In particular:
     /// * Allows HTTP as metadata endpoints do not use TLS
-    /// * Configures a low connection timeout to provide quick feedback if not present
+    /// * Configures a connection timeout to provide quick feedback if not present
+    /// * Applies the metadata-specific request timeout if configured
     #[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
     pub(crate) fn metadata_options(&self) -> Self {
-        self.clone()
+        const DEFAULT_METADATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+        let connect_timeout = self
+            .metadata_connect_timeout
+            .as_ref()
+            .and_then(|v| v.get().ok())
+            .unwrap_or(DEFAULT_METADATA_CONNECT_TIMEOUT);
+        let mut options = self
+            .clone()
             .with_allow_http(true)
-            .with_connect_timeout(Duration::from_secs(1))
+            .with_connect_timeout(connect_timeout);
+        if let Some(t) = self.metadata_timeout.as_ref().and_then(|v| v.get().ok()) {
+            options = options.with_timeout(t);
+        }
+        options
     }
 
     #[cfg(not(target_arch = "wasm32"))]
