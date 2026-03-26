@@ -307,6 +307,38 @@ impl Certificate {
     }
 }
 
+/// A hook that can apply arbitrary modifications to a [`reqwest::ClientBuilder`]
+/// before the client is built.
+///
+/// Implement this trait to customize the underlying HTTP client in ways not
+/// directly exposed by [`ClientOptions`].
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use object_store::client::{ClientOptions, ClientBuilderHook};
+///
+/// #[derive(Debug)]
+/// struct TcpNoDelay;
+///
+/// impl ClientBuilderHook for TcpNoDelay {
+///     fn customize(
+///         &self,
+///         builder: reqwest::ClientBuilder,
+///     ) -> reqwest::ClientBuilder {
+///         builder.tcp_nodelay(true)
+///     }
+/// }
+///
+/// let options = ClientOptions::new()
+///     .with_client_builder_hook(TcpNoDelay);
+/// ```
+pub trait ClientBuilderHook: Send + Sync + std::fmt::Debug {
+    /// Called with the [`reqwest::ClientBuilder`] after all [`ClientOptions`]
+    /// settings have been applied, but before [`reqwest::ClientBuilder::build`].
+    fn customize(&self, builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder;
+}
+
 /// HTTP client configuration for remote object stores
 #[derive(Debug, Clone)]
 pub struct ClientOptions {
@@ -332,6 +364,7 @@ pub struct ClientOptions {
     http1_only: ConfigValue<bool>,
     http2_only: ConfigValue<bool>,
     randomize_addresses: ConfigValue<bool>,
+    client_builder_hook: Option<Arc<dyn ClientBuilderHook>>,
 }
 
 impl Default for ClientOptions {
@@ -369,6 +402,7 @@ impl Default for ClientOptions {
             http1_only: true.into(),
             http2_only: Default::default(),
             randomize_addresses: true.into(),
+            client_builder_hook: None,
         }
     }
 }
@@ -708,6 +742,38 @@ impl ClientOptions {
         self
     }
 
+    /// Set a hook that will be called with the [`reqwest::ClientBuilder`]
+    /// after all [`ClientOptions`] settings have been applied, but just before
+    /// [`reqwest::ClientBuilder::build`] is called.
+    ///
+    /// This allows arbitrary modifications to the underlying HTTP client that
+    /// are not directly exposed by [`ClientOptions`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use object_store::client::{ClientOptions, ClientBuilderHook};
+    ///
+    /// #[derive(Debug)]
+    /// struct TcpNoDelay;
+    ///
+    /// impl ClientBuilderHook for TcpNoDelay {
+    ///     fn customize(
+    ///         &self,
+    ///         builder: reqwest::ClientBuilder,
+    ///     ) -> reqwest::ClientBuilder {
+    ///         builder.tcp_nodelay(true)
+    ///     }
+    /// }
+    ///
+    /// let options = ClientOptions::new()
+    ///     .with_client_builder_hook(TcpNoDelay);
+    /// ```
+    pub fn with_client_builder_hook(mut self, hook: impl ClientBuilderHook + 'static) -> Self {
+        self.client_builder_hook = Some(Arc::new(hook));
+        self
+    }
+
     /// Get the default headers defined through `ClientOptions::with_default_headers`
     pub fn get_default_headers(&self) -> Option<&HeaderMap> {
         self.default_headers.as_ref()
@@ -744,7 +810,7 @@ impl ClientOptions {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn client(&self) -> Result<reqwest::Client> {
+    pub fn client(&self) -> Result<reqwest::Client> {
         let mut builder = reqwest::ClientBuilder::new();
 
         match &self.user_agent {
@@ -833,14 +899,17 @@ impl ClientOptions {
             builder = builder.dns_resolver(Arc::new(dns::ShuffleResolver));
         }
 
-        builder
-            .https_only(!self.allow_http.get()?)
-            .build()
-            .map_err(map_client_error)
+        builder = builder.https_only(!self.allow_http.get()?);
+
+        if let Some(hook) = &self.client_builder_hook {
+            builder = hook.customize(builder);
+        }
+
+        builder.build().map_err(map_client_error)
     }
 
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-    pub(crate) fn client(&self) -> Result<reqwest::Client> {
+    pub fn client(&self) -> Result<reqwest::Client> {
         let mut builder = reqwest::ClientBuilder::new();
 
         match &self.user_agent {
@@ -850,6 +919,10 @@ impl ClientOptions {
 
         if let Some(headers) = &self.default_headers {
             builder = builder.default_headers(headers.clone())
+        }
+
+        if let Some(hook) = &self.client_builder_hook {
+            builder = hook.customize(builder);
         }
 
         builder.build().map_err(map_client_error)
