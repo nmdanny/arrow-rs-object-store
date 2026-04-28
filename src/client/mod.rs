@@ -494,7 +494,7 @@ impl ClientOptions {
             ClientConfigKey::MetadataTimeout => {
                 self.metadata_timeout = Some(ConfigValue::Deferred(value.into()))
             }
-            ClientConfigKey::MetadataConnectTimeout => {
+            ClientConfigKey::MetadataConnectTimeout=> {
                 self.metadata_connect_timeout = Some(ConfigValue::Deferred(value.into()))
             }
             ClientConfigKey::DefaultContentType => self.default_content_type = Some(value.into()),
@@ -525,9 +525,6 @@ impl ClientOptions {
                 self.randomize_addresses.parse(value);
             }
             ClientConfigKey::Timeout => self.timeout = Some(ConfigValue::Deferred(value.into())),
-            ClientConfigKey::MetadataTimeout => {
-                self.metadata_timeout = Some(ConfigValue::Deferred(value.into()))
-            }
             ClientConfigKey::UserAgent => {
                 self.user_agent = Some(ConfigValue::Deferred(value.into()))
             }
@@ -957,6 +954,7 @@ impl ClientOptions {
         options
     }
 
+    /// Build a client
     #[cfg(not(target_arch = "wasm32"))]
     pub fn client(&self) -> Result<reqwest::Client> {
         let mut builder = reqwest::ClientBuilder::new();
@@ -1063,6 +1061,7 @@ impl ClientOptions {
         builder.build().map_err(map_client_error)
     }
 
+    /// Build a client
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
     pub fn client(&self) -> Result<reqwest::Client> {
         let mut builder = reqwest::ClientBuilder::new();
