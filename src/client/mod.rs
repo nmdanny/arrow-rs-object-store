@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! Generic utilities for [`reqwest`] based [`ObjectStore`] implementations
+//! Generic utilities for network based [`ObjectStore`] implementations
 //!
 //! [`ObjectStore`]: crate::ObjectStore
 
@@ -30,28 +30,59 @@ pub(crate) mod mock_server;
 
 pub(crate) mod retry;
 
-#[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
+#[cfg(any(
+    feature = "aws-no-crypto",
+    feature = "gcp-no-crypto",
+    feature = "azure-no-crypto"
+))]
 pub(crate) mod pagination;
 
 pub(crate) mod get;
 
-#[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
+#[cfg(any(
+    feature = "aws-no-crypto",
+    feature = "gcp-no-crypto",
+    feature = "azure-no-crypto"
+))]
 pub(crate) mod list;
 
-#[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
+#[cfg(any(
+    feature = "aws-no-crypto",
+    feature = "gcp-no-crypto",
+    feature = "azure-no-crypto"
+))]
 pub(crate) mod token;
 
 pub(crate) mod header;
 
-#[cfg(any(feature = "aws", feature = "gcp"))]
+#[cfg(any(feature = "aws-no-crypto", feature = "gcp-no-crypto"))]
 pub(crate) mod s3;
 
 pub(crate) mod builder;
 mod http;
 
-#[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
-pub(crate) mod parts;
 pub use http::*;
+
+#[cfg(any(
+    feature = "aws-no-crypto",
+    feature = "gcp-no-crypto",
+    feature = "azure-no-crypto"
+))]
+pub(crate) mod parts;
+
+#[cfg(any(
+    feature = "aws-no-crypto",
+    feature = "gcp-no-crypto",
+    feature = "azure-no-crypto"
+))]
+mod crypto;
+
+#[cfg(any(
+    feature = "aws-no-crypto",
+    feature = "gcp-no-crypto",
+    feature = "azure-no-crypto"
+))]
+pub use crypto::*;
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
@@ -103,6 +134,14 @@ pub enum ClientConfigKey {
     /// Supported keys:
     /// - `allow_invalid_certificates`
     AllowInvalidCertificates,
+    /// Disable certificate validation using the operating system's certificate facilities.
+    ///
+    /// See [`ClientOptions::with_no_system_certificates`]
+    ///
+    /// Supported keys:
+    ///
+    /// - `no_system_certificates`
+    NoSystemCertificates,
     /// Timeout for only the connect phase of a Client
     ///
     /// Supported keys:
@@ -223,6 +262,7 @@ impl AsRef<str> for ClientConfigKey {
         match self {
             Self::AllowHttp => "allow_http",
             Self::AllowInvalidCertificates => "allow_invalid_certificates",
+            Self::NoSystemCertificates => "disable_system_certificates",
             Self::ConnectTimeout => "connect_timeout",
             Self::MetadataConnectTimeout => "metadata_connect_timeout",
             Self::DefaultContentType => "default_content_type",
@@ -252,6 +292,7 @@ impl FromStr for ClientConfigKey {
         match s {
             "allow_http" => Ok(Self::AllowHttp),
             "allow_invalid_certificates" => Ok(Self::AllowInvalidCertificates),
+            "disable_system_certificates" => Ok(Self::NoSystemCertificates),
             "connect_timeout" => Ok(Self::ConnectTimeout),
             "metadata_connect_timeout" => Ok(Self::MetadataConnectTimeout),
             "default_content_type" => Ok(Self::DefaultContentType),
@@ -271,7 +312,7 @@ impl FromStr for ClientConfigKey {
             "metadata_timeout" => Ok(Self::MetadataTimeout),
             "user_agent" => Ok(Self::UserAgent),
             _ => Err(super::Error::UnknownConfigurationKey {
-                store: "HTTP",
+                store: "http-no-crypto",
                 key: s.into(),
             }),
         }
@@ -367,6 +408,7 @@ pub struct ClientOptions {
     user_agent: Option<ConfigValue<HeaderValue>>,
     #[cfg(not(target_arch = "wasm32"))]
     root_certificates: Vec<Certificate>,
+    no_system_certificates: ConfigValue<bool>,
     content_type_map: HashMap<String, String>,
     default_content_type: Option<String>,
     default_headers: Option<HeaderMap>,
@@ -404,6 +446,7 @@ impl Default for ClientOptions {
             user_agent: None,
             #[cfg(not(target_arch = "wasm32"))]
             root_certificates: Default::default(),
+            no_system_certificates: false.into(),
             content_type_map: Default::default(),
             default_content_type: None,
             default_headers: None,
@@ -444,6 +487,7 @@ impl ClientOptions {
         match key {
             ClientConfigKey::AllowHttp => self.allow_http.parse(value),
             ClientConfigKey::AllowInvalidCertificates => self.allow_insecure.parse(value),
+            ClientConfigKey::NoSystemCertificates => self.no_system_certificates.parse(value),
             ClientConfigKey::ConnectTimeout => {
                 self.connect_timeout = Some(ConfigValue::Deferred(value.into()))
             }
@@ -496,6 +540,7 @@ impl ClientOptions {
         match key {
             ClientConfigKey::AllowHttp => Some(self.allow_http.to_string()),
             ClientConfigKey::AllowInvalidCertificates => Some(self.allow_insecure.to_string()),
+            ClientConfigKey::NoSystemCertificates => Some(self.no_system_certificates.to_string()),
             ClientConfigKey::ConnectTimeout => self.connect_timeout.as_ref().map(fmt_duration),
             ClientConfigKey::MetadataTimeout => self.metadata_timeout.as_ref().map(fmt_duration),
             ClientConfigKey::MetadataConnectTimeout => {
@@ -582,6 +627,7 @@ impl ClientOptions {
         self.allow_http = allow_http.into();
         self
     }
+
     /// Allows connections to invalid SSL certificates
     ///
     /// If `allow_invalid_certificates` is :
@@ -601,6 +647,20 @@ impl ClientOptions {
     /// </div>
     pub fn with_allow_invalid_certificates(mut self, allow_insecure: bool) -> Self {
         self.allow_insecure = allow_insecure.into();
+        self
+    }
+
+    /// Disable certificates provided by the system
+    ///
+    /// By default TLS certificates are validated using [`rustls-platform-verifier`],
+    /// which makes use of the system's trust store, in addition to any certificates
+    /// registered using [`Self::with_root_certificate`]. If disabled, instead [`rustls-webpki`]
+    /// is used with only the certificates registered using [`Self::with_root_certificate`].
+    ///
+    /// [`rustls-platform-verifier`]: https://crates.io/crates/rustls-platform-verifier
+    /// [`rustls-webpki`]: https://crates.io/crates/rustls-webpki
+    pub fn with_no_system_certificates(mut self, no_certs: bool) -> Self {
+        self.no_system_certificates = no_certs.into();
         self
     }
 
@@ -875,7 +935,11 @@ impl ClientOptions {
     /// * Allows HTTP as metadata endpoints do not use TLS
     /// * Configures a connection timeout to provide quick feedback if not present
     /// * Applies the metadata-specific request timeout if configured
-    #[cfg(any(feature = "aws", feature = "gcp", feature = "azure"))]
+    #[cfg(any(
+        feature = "aws-no-crypto",
+        feature = "gcp-no-crypto",
+        feature = "azure-no-crypto"
+    ))]
     pub(crate) fn metadata_options(&self) -> Self {
         const DEFAULT_METADATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
         let connect_timeout = self
@@ -913,7 +977,7 @@ impl ClientOptions {
                 let certificate = reqwest::tls::Certificate::from_pem(certificate.as_bytes())
                     .map_err(map_client_error)?;
 
-                builder = builder.add_root_certificate(certificate);
+                builder = builder.tls_certs_merge(std::iter::once(certificate));
             }
 
             if let Some(proxy_excludes) = &self.proxy_excludes {
@@ -925,8 +989,15 @@ impl ClientOptions {
             builder = builder.proxy(proxy);
         }
 
-        for certificate in &self.root_certificates {
-            builder = builder.add_root_certificate(certificate.0.clone());
+        let certs = self
+            .root_certificates
+            .iter()
+            .map(|certificate| certificate.0.clone());
+
+        if self.no_system_certificates.get()? {
+            builder = builder.tls_certs_only(certs);
+        } else {
+            builder = builder.tls_certs_merge(certs);
         }
 
         if let Some(timeout) = &self.timeout {
@@ -1096,7 +1167,11 @@ where
     }
 }
 
-#[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+#[cfg(any(
+    feature = "aws-no-crypto",
+    feature = "azure-no-crypto",
+    feature = "gcp-no-crypto"
+))]
 mod cloud {
     use super::*;
     use crate::RetryConfig;
@@ -1122,7 +1197,7 @@ mod cloud {
         }
 
         /// Override the minimum remaining TTL for a cached token to be used
-        #[cfg(any(feature = "aws", feature = "gcp"))]
+        #[cfg(any(feature = "aws-no-crypto", feature = "gcp-no-crypto"))]
         pub(crate) fn with_min_ttl(mut self, min_ttl: Duration) -> Self {
             self.cache = self.cache.with_min_ttl(min_ttl);
             self
@@ -1153,7 +1228,11 @@ mod cloud {
 }
 
 use crate::client::builder::HttpRequestBuilder;
-#[cfg(any(feature = "aws", feature = "azure", feature = "gcp"))]
+#[cfg(any(
+    feature = "aws-no-crypto",
+    feature = "azure-no-crypto",
+    feature = "gcp-no-crypto"
+))]
 pub(crate) use cloud::*;
 
 #[cfg(test)]
